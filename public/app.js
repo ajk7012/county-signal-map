@@ -81,10 +81,14 @@ async function boot() {
   els.feedLink.textContent = config.broadcastify.feedName;
   els.feedLink.href = config.broadcastify.feedUrl;
   els.feedNotes.textContent = config.broadcastify.notes;
-  els.modelNotes.textContent = `OpenAI model: ${config.openAiModel}. Public safety delay: ${config.publicSafetyDelayMinutes} min.`;
-  els.liveNotes.textContent = config.demoMode
-    ? "Current stream is demo data. Add licensed audio or your own scanner feed for real-time transcription."
-    : "OpenAI transcription is enabled for uploaded or licensed audio.";
+  els.modelNotes.textContent =
+    config.transcribeProvider === "local"
+      ? `Local model: ${config.localEngine} ${config.localModel}. Public safety delay: ${config.publicSafetyDelayMinutes} min.`
+      : `OpenAI model: ${config.openAiModel}. Public safety delay: ${config.publicSafetyDelayMinutes} min.`;
+  els.liveNotes.textContent =
+    config.transcribeProvider === "local"
+      ? "Local transcription is enabled. First run downloads the model, then later runs use the local cache."
+      : config.openAiKeyIssue ?? "OpenAI transcription is enabled for uploaded or live-captured audio.";
   view.center = config.county.center;
 
   pixiApp = new PIXI.Application();

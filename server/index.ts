@@ -7,9 +7,10 @@ import { z } from "zod";
 import { extractIncident } from "./lib/addressParser";
 import { fetchBroadcastifyFeed } from "./lib/broadcastify";
 import { getCountyPreset } from "./lib/counties";
+import { transcribeAudioLocally } from "./lib/localTranscription";
 import { transcribeAudio } from "./lib/openaiTranscription";
 
-dotenv.config();
+dotenv.config({ override: true });
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -17,6 +18,8 @@ const port = Number(process.env.PORT ?? 8787);
 const compatibilityPort = Number(process.env.COMPATIBILITY_PORT ?? 5173);
 const preset = getCountyPreset(process.env.COUNTY_PRESET ?? "greene-oh");
 const publicSafetyDelayMinutes = Number(process.env.PUBLIC_SAFETY_DELAY_MINUTES ?? 15);
+const transcribeProvider = getTranscribeProvider();
+const openAiKeyIssue = transcribeProvider === "openai" ? getOpenAiKeyIssue(process.env.OPENAI_API_KEY) : null;
 
 app.use(cors());
 app.use(express.json());
@@ -36,8 +39,13 @@ app.get("/api/config", (_req, res) => {
     county: preset,
     broadcastify: preset.broadcastify,
     openAiModel: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-transcribe",
+    transcribeProvider,
+    localModel: process.env.LOCAL_TRANSCRIBE_MODEL ?? "large-v3-turbo",
+    localEngine: "faster-whisper",
     publicSafetyDelayMinutes,
-    demoMode: !process.env.OPENAI_API_KEY
+    demoMode: Boolean(openAiKeyIssue),
+    openAiKeyConfigured: !openAiKeyIssue,
+    openAiKeyIssue
   });
 });
 
@@ -71,19 +79,15 @@ app.post("/api/transcribe-upload", upload.single("audio"), async (req, res) => {
     return;
   }
 
-  if (!process.env.OPENAI_API_KEY) {
-    res.status(400).json({ error: "Set OPENAI_API_KEY to enable transcription." });
-    return;
-  }
-
   try {
-    const transcript = await transcribeAudio({
-      apiKey: process.env.OPENAI_API_KEY,
-      buffer: req.file.buffer,
-      filename: req.file.originalname,
-      mimeType: req.file.mimetype,
-      model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-transcribe"
-    });
+    const transcript =
+      transcribeProvider === "local"
+        ? await transcribeAudioLocally({
+            buffer: req.file.buffer,
+            filename: req.file.originalname,
+            mimeType: req.file.mimetype
+          })
+        : await transcribeWithOpenAi(req.file);
     const incident = extractIncident(transcript, preset);
     res.json({ transcript, incident });
   } catch (error) {
@@ -137,4 +141,48 @@ if (compatibilityPort !== port) {
   app.listen(compatibilityPort, "127.0.0.1", () => {
     console.log(`County Signal Map compatibility URL listening on http://127.0.0.1:${compatibilityPort}`);
   });
+}
+
+function getTranscribeProvider(): "openai" | "local" {
+  return process.env.TRANSCRIBE_PROVIDER?.toLowerCase() === "local" ? "local" : "openai";
+}
+
+function transcribeWithOpenAi(file: Express.Multer.File): Promise<string> {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("Set OPENAI_API_KEY to enable OpenAI transcription, or set TRANSCRIBE_PROVIDER=local.");
+  }
+
+  const keyIssue = getOpenAiKeyIssue(process.env.OPENAI_API_KEY);
+  if (keyIssue) {
+    throw new Error(keyIssue);
+  }
+
+  return transcribeAudio({
+    apiKey: process.env.OPENAI_API_KEY,
+    buffer: file.buffer,
+    filename: file.originalname,
+    mimeType: file.mimetype,
+    model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-transcribe"
+  });
+}
+
+function getOpenAiKeyIssue(value: string | undefined): string | null {
+  const key = value?.trim();
+  if (!key) {
+    return "Set OPENAI_API_KEY in .env to enable live transcription.";
+  }
+
+  if (key.startsWith("AIza")) {
+    return "OPENAI_API_KEY is set to a Google API key. OpenAI keys start with sk-. Create one at https://platform.openai.com/api-keys.";
+  }
+
+  if (key.includes("your-openai-api-key") || key.includes("your-real-openai-key") || key.length < 40) {
+    return "OPENAI_API_KEY is still a placeholder or too short. Paste the full OpenAI key from https://platform.openai.com/api-keys.";
+  }
+
+  if (!key.startsWith("sk-")) {
+    return "OPENAI_API_KEY does not look like an OpenAI API key. OpenAI keys start with sk-.";
+  }
+
+  return null;
 }

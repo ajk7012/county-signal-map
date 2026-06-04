@@ -29,13 +29,40 @@ Open http://127.0.0.1:8787. The server also listens on http://127.0.0.1:5173 for
 Copy `.env.example` to `.env` and set values as needed.
 
 ```bash
+TRANSCRIBE_PROVIDER=openai
 OPENAI_API_KEY=sk-...
 OPENAI_TRANSCRIBE_MODEL=gpt-4o-transcribe
+LOCAL_TRANSCRIBE_MODEL=large-v3-turbo
+LOCAL_TRANSCRIBE_DEVICE=auto
+LOCAL_TRANSCRIBE_COMPUTE_TYPE=default
+LOCAL_TRANSCRIBE_LANGUAGE=en
+LOCAL_TRANSCRIBE_PYTHON=python
 BROADCASTIFY_API_KEY=
 COUNTY_PRESET=greene-oh
 PUBLIC_SAFETY_DELAY_MINUTES=15
 PORT=8787
 ```
+
+## Local Transcription
+
+For local/offline transcription, switch providers in `.env`:
+
+```bash
+TRANSCRIBE_PROVIDER=local
+LOCAL_TRANSCRIBE_MODEL=large-v3-turbo
+LOCAL_TRANSCRIBE_DEVICE=auto
+LOCAL_TRANSCRIBE_COMPUTE_TYPE=default
+LOCAL_TRANSCRIBE_LANGUAGE=en
+LOCAL_TRANSCRIBE_PYTHON=python
+```
+
+Install the Python bridge dependencies:
+
+```bash
+python -m pip install -r requirements-local.txt
+```
+
+The recommended local default is `large-v3-turbo` through `faster-whisper`. The first run downloads the model to your local Hugging Face cache; later runs reuse it. For maximum accuracy over speed, try `LOCAL_TRANSCRIBE_MODEL=large-v3`.
 
 ## API
 
