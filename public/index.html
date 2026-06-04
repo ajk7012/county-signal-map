@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>County Signal Map</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="mapPane">
+        <div id="tileLayer" class="tileLayer"></div>
+        <div id="map" class="pixiHost"></div>
+        <div class="mapTools">
+          <button id="zoomIn" title="Zoom in">+</button>
+          <button id="zoomOut" title="Zoom out">-</button>
+          <select id="mapLayer" title="Map layer">
+            <option value="osm">OpenStreetMap</option>
+            <option value="hot">OSM Humanitarian</option>
+            <option value="carto">Carto Roads</option>
+          </select>
+          <button id="resetMap" title="Reset map">Reset</button>
+        </div>
+        <div id="mapStatus" class="mapStatus">Road map</div>
+        <small class="attribution">Map tiles © OpenStreetMap contributors</small>
+      </section>
+      <aside class="sidePanel">
+        <div class="masthead">
+          <span id="title">County Signal Map</span>
+          <strong id="status">Connecting to local demo stream</strong>
+        </div>
+
+        <div class="feedBox">
+          <div>
+            <small>Broadcastify target</small>
+            <a id="feedLink" href="#" target="_blank" rel="noreferrer">Loading feed</a>
+          </div>
+          <p id="feedNotes"></p>
+          <small id="modelNotes"></small>
+          <small id="liveNotes"></small>
+        </div>
+
+        <div class="liveFeedBox">
+          <div class="liveFeedHeader">
+            <div>
+              <small>User supplied live feed</small>
+              <strong>Broadcastify player</strong>
+            </div>
+            <a id="openFeed" href="#" target="_blank" rel="noreferrer">Open</a>
+          </div>
+          <div class="feedControls">
+            <input id="liveFeedUrl" type="url" value="https://www.broadcastify.com/listen/feed/popout.php?feedId=33333" />
+            <button id="loadFeed">Load</button>
+          </div>
+          <iframe id="liveFeedFrame" title="Live public safety audio feed" referrerpolicy="no-referrer"></iframe>
+          <div class="liveParseControls">
+            <button id="startLiveParse">Start live parse</button>
+            <button id="stopLiveParse" disabled>Stop</button>
+          </div>
+          <small id="liveParseStatus">Live parser idle</small>
+          <small>To parse live audio, click Start live parse and choose the feed tab with audio sharing enabled.</small>
+        </div>
+
+        <div class="parserBox">
+          <textarea id="transcript">Unit 12 respond to 69 West Hebble Avenue in Fairborn for a disturbance.</textarea>
+          <button id="parseButton">Parse transcript</button>
+        </div>
+
+        <div class="stats">
+          <span id="totalCount">0 transcripts</span>
+          <span id="plottedCount">0 plotted</span>
+        </div>
+
+        <ol id="incidentList" class="incidentList"></ol>
+      </aside>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
