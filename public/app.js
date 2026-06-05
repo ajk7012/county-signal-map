@@ -34,7 +34,7 @@ let liveCapture = {
   active: false
 };
 
-const liveChunkMs = 6000;
+const liveChunkMs = 10000;
 const voiceHoldMs = 2500;
 
 const tileProviders = {
@@ -313,6 +313,10 @@ async function startLiveParse() {
 
     recorder.addEventListener("dataavailable", (event) => {
       if (!liveCapture.active || event.data.size < 1200) return;
+      if (liveCapture.busy) {
+        logBusySkip();
+        return;
+      }
       if (els.volumeGate.checked && !wasVoiceRecentlyActive()) {
         logQuietSkip();
         return;
@@ -431,18 +435,16 @@ function getRecorderMimeType() {
 }
 
 function enqueueLiveChunk(blob) {
-  if (liveCapture.busy) {
-    liveCapture.queue = [blob];
-    const now = Date.now();
-    if (now - liveCapture.lastBusyLogAt > 12000) {
-      liveCapture.lastBusyLogAt = now;
-      addLiveLog("info", "Transcription is still busy. Keeping the newest voice chunk next.");
-    }
-    return;
-  }
-
   liveCapture.queue = [blob];
   processLiveQueue();
+}
+
+function logBusySkip() {
+  const now = Date.now();
+  if (now - liveCapture.lastBusyLogAt < 15000) return;
+  liveCapture.lastBusyLogAt = now;
+  els.liveParseStatus.textContent = "Waiting for current transcription";
+  addLiveLog("info", "Current transcription is still running. Skipping this chunk instead of building a backlog.");
 }
 
 async function processLiveQueue() {

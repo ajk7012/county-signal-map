@@ -37,6 +37,8 @@ LOCAL_TRANSCRIBE_DEVICE=auto
 LOCAL_TRANSCRIBE_COMPUTE_TYPE=default
 LOCAL_TRANSCRIBE_LANGUAGE=en
 LOCAL_TRANSCRIBE_PYTHON=python
+LOCAL_TRANSCRIBE_TIMEOUT_MS=120000
+LOCAL_TRANSCRIBE_LOAD_TIMEOUT_MS=300000
 BROADCASTIFY_API_KEY=
 COUNTY_PRESET=greene-oh
 PUBLIC_SAFETY_DELAY_MINUTES=15
@@ -63,6 +65,12 @@ python -m pip install -r requirements-local.txt
 ```
 
 The recommended local default is `large-v3-turbo` through `faster-whisper`. The first run downloads the model to your local Hugging Face cache; later runs reuse it. For maximum accuracy over speed, try `LOCAL_TRANSCRIBE_MODEL=large-v3`.
+
+For live scanner parsing on CPU-only machines, use a smaller model if transcription falls behind:
+
+```bash
+LOCAL_TRANSCRIBE_MODEL=small.en
+```
 
 ## API
 

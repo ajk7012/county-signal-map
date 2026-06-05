@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,25 @@ type LocalTranscribeOptions = {
   mimeType: string;
 };
 
+type WorkerResult = {
+  transcript?: string;
+  error?: string;
+};
+
+type PendingRequest = {
+  audioPath: string;
+  resolve: (value: WorkerResult) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+};
+
+let worker: ChildProcessWithoutNullStreams | null = null;
+let workerReady: Promise<void> | null = null;
+let workerBuffer = "";
+let workerLoadError: string | null = null;
+let workerRequestId = 0;
+const pendingRequests = new Map<string, PendingRequest>();
+
 export async function transcribeAudioLocally(options: LocalTranscribeOptions): Promise<string> {
   const tempDir = path.join(os.tmpdir(), "county-signal-map");
   await mkdir(tempDir, { recursive: true });
@@ -17,7 +36,7 @@ export async function transcribeAudioLocally(options: LocalTranscribeOptions): P
   await writeFile(audioPath, options.buffer);
 
   try {
-    const result = await runLocalTranscriber(audioPath);
+    const result = await runLocalWorker(audioPath);
     if (result.error) {
       throw new Error(result.error);
     }
@@ -28,12 +47,44 @@ export async function transcribeAudioLocally(options: LocalTranscribeOptions): P
   }
 }
 
-function runLocalTranscriber(audioPath: string): Promise<{ transcript?: string; error?: string }> {
+async function runLocalWorker(audioPath: string): Promise<WorkerResult> {
+  await ensureWorkerReady();
+
+  if (!worker?.stdin.writable) {
+    resetWorker();
+    throw new Error("Local transcription worker is not writable. Try again after the worker restarts.");
+  }
+
+  const id = String(++workerRequestId);
+  const timeoutMs = Number(process.env.LOCAL_TRANSCRIBE_TIMEOUT_MS ?? 120000);
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingRequests.delete(id);
+      resetWorker();
+      reject(new Error(`Local transcription timed out after ${Math.round(timeoutMs / 1000)} seconds. Try LOCAL_TRANSCRIBE_MODEL=small.en or use TRANSCRIBE_PROVIDER=openai for live parsing.`));
+    }, timeoutMs);
+
+    pendingRequests.set(id, {
+      audioPath,
+      resolve,
+      reject,
+      timeout
+    });
+
+    worker!.stdin.write(`${JSON.stringify({ id, audioPath })}\n`);
+  });
+}
+
+async function ensureWorkerReady(): Promise<void> {
+  if (workerReady) {
+    return workerReady;
+  }
+
   const python = process.env.LOCAL_TRANSCRIBE_PYTHON ?? "python";
-  const scriptPath = path.resolve("scripts/local_transcribe.py");
+  const scriptPath = path.resolve("scripts/local_transcribe_worker.py");
   const args = [
     scriptPath,
-    audioPath,
     "--model",
     process.env.LOCAL_TRANSCRIBE_MODEL ?? "large-v3-turbo",
     "--device",
@@ -44,22 +95,51 @@ function runLocalTranscriber(audioPath: string): Promise<{ transcript?: string; 
     process.env.LOCAL_TRANSCRIBE_LANGUAGE ?? "en"
   ];
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(python, args, {
+  workerReady = new Promise((resolve, reject) => {
+    workerLoadError = null;
+    worker = spawn(python, args, {
       cwd: process.cwd(),
       windowsHide: true
     });
 
-    let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+    const loadTimeout = setTimeout(() => {
+      resetWorker();
+      reject(new Error("Local transcription model is still loading. The first run may need to download the model; if it stays stuck, use LOCAL_TRANSCRIBE_MODEL=small.en for live parsing."));
+    }, Number(process.env.LOCAL_TRANSCRIBE_LOAD_TIMEOUT_MS ?? 300000));
+
+    worker.stdout.on("data", (chunk) => {
+      workerBuffer += chunk.toString();
+      drainWorkerLines((message) => {
+        if (message.type === "loading") {
+          return;
+        }
+
+        if (message.type === "ready") {
+          clearTimeout(loadTimeout);
+          if (message.error) {
+            workerLoadError = message.error;
+            reject(new Error(message.error));
+            return;
+          }
+
+          resolve();
+          return;
+        }
+
+        if (message.type === "result") {
+          handleWorkerResult(message);
+        }
+      });
     });
-    child.stderr.on("data", (chunk) => {
+
+    worker.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("error", (error: NodeJS.ErrnoException) => {
+
+    worker.on("error", (error: NodeJS.ErrnoException) => {
+      clearTimeout(loadTimeout);
       if (error.code === "ENOENT") {
         reject(new Error(`Local transcription could not start Python command "${python}". Set LOCAL_TRANSCRIBE_PYTHON in .env.`));
         return;
@@ -67,31 +147,64 @@ function runLocalTranscriber(audioPath: string): Promise<{ transcript?: string; 
 
       reject(error);
     });
-    child.on("close", (code) => {
-      const parsed = parseJson(stdout);
-      if (parsed) {
-        resolve(parsed);
-        return;
-      }
 
-      resolve({
-        error: `Local transcription failed with exit code ${code}. ${stderr || stdout || "No output."}`.trim()
-      });
+    worker.on("close", (code) => {
+      clearTimeout(loadTimeout);
+      const error = new Error(`Local transcription worker exited with code ${code}. ${stderr || workerLoadError || "No output."}`.trim());
+      for (const request of pendingRequests.values()) {
+        clearTimeout(request.timeout);
+        request.reject(error);
+      }
+      pendingRequests.clear();
+      resetWorker();
+      reject(error);
     });
+  });
+
+  return workerReady;
+}
+
+function drainWorkerLines(onMessage: (message: any) => void): void {
+  let newlineIndex = workerBuffer.indexOf("\n");
+  while (newlineIndex >= 0) {
+    const line = workerBuffer.slice(0, newlineIndex).trim();
+    workerBuffer = workerBuffer.slice(newlineIndex + 1);
+    if (line) {
+      try {
+        onMessage(JSON.parse(line));
+      } catch {
+        // Ignore non-JSON output from Python libraries.
+      }
+    }
+    newlineIndex = workerBuffer.indexOf("\n");
+  }
+}
+
+function handleWorkerResult(message: { id?: string; transcript?: string; error?: string }): void {
+  if (!message.id) {
+    return;
+  }
+
+  const request = pendingRequests.get(message.id);
+  if (!request) {
+    return;
+  }
+
+  pendingRequests.delete(message.id);
+  clearTimeout(request.timeout);
+  request.resolve({
+    transcript: message.transcript,
+    error: message.error
   });
 }
 
-function parseJson(value: string): { transcript?: string; error?: string } | null {
-  const text = value.trim();
-  if (!text) {
-    return null;
+function resetWorker(): void {
+  if (worker) {
+    worker.kill();
   }
-
-  try {
-    return JSON.parse(text) as { transcript?: string; error?: string };
-  } catch {
-    return null;
-  }
+  worker = null;
+  workerReady = null;
+  workerBuffer = "";
 }
 
 function getExtension(options: LocalTranscribeOptions): string {
