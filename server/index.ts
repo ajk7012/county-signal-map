@@ -23,6 +23,7 @@ const openAiKeyIssue = transcribeProvider === "openai" ? getOpenAiKeyIssue(proce
 
 app.use(cors());
 app.use(express.json());
+
 app.use(
   express.static("public", {
     setHeaders: (res) => {
@@ -30,6 +31,7 @@ app.use(
     }
   })
 );
+
 app.get("/vendor/pixi.mjs", (_req, res) => {
   res.sendFile(path.resolve("node_modules/pixi.js/dist/pixi.mjs"));
 });
@@ -53,15 +55,20 @@ const transcriptSchema = z.object({
   transcript: z.string().min(1)
 });
 
-app.post("/api/parse", (req, res) => {
+app.post("/api/parse", async (req, res) => {
   const parsed = transcriptSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Expected { transcript: string }." });
     return;
   }
 
-  const incident = extractIncident(parsed.data.transcript, preset);
-  res.json({ incident });
+  try {
+    const incident = await extractIncident(parsed.data.transcript, preset);
+    res.json({ incident });
+  } catch (error) {
+    console.error("Parse failed:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Parse failed." });
+  }
 });
 
 app.get("/api/broadcastify/feed", async (_req, res) => {
@@ -88,9 +95,11 @@ app.post("/api/transcribe-upload", upload.single("audio"), async (req, res) => {
             mimeType: req.file.mimetype
           })
         : await transcribeWithOpenAi(req.file);
-    const incident = extractIncident(transcript, preset);
+
+    const incident = await extractIncident(transcript, preset);
     res.json({ transcript, incident });
   } catch (error) {
+    console.error("Transcribe upload failed:", error);
     res.status(500).json({ error: error instanceof Error ? error.message : "Transcription failed." });
   }
 });
@@ -104,6 +113,9 @@ app.get("/api/incidents/stream", (req, res) => {
 
   const samples = [
     "Unit 12 respond to 69 West Hebble Avenue in Fairborn for a disturbance.",
+    "Medic requested to 131 Kinsey Road.",
+    "EMS respond to 145 Diana Lane North.",
+    "130 Roger Street, Hillside Assisted Living Medical Advanced Care.",
     "Medic and sheriff requested near 100 Dayton Street, Yellow Springs for a welfare check.",
     "Xenia PD traffic crash at 101 North Detroit Street.",
     "Report of smoke near 60 South Charleston Road in Cedarville.",
@@ -111,17 +123,45 @@ app.get("/api/incidents/stream", (req, res) => {
   ];
 
   let index = 0;
-  const sendIncident = () => {
+  let closed = false;
+
+  const sendIncident = async () => {
+    if (closed) return;
+
     const transcript = samples[index % samples.length];
     index += 1;
-    const incident = extractIncident(transcript, preset);
-    res.write(`event: incident\n`);
-    res.write(`data: ${JSON.stringify({ incident })}\n\n`);
+
+    try {
+      const incident = await extractIncident(transcript, preset);
+
+      if (closed) return;
+
+      res.write("event: incident\n");
+      res.write(`data: ${JSON.stringify({ incident })}\n\n`);
+    } catch (error) {
+      console.error("Demo stream incident parse failed:", error);
+
+      if (closed) return;
+
+      res.write("event: error\n");
+      res.write(
+        `data: ${JSON.stringify({
+          error: error instanceof Error ? error.message : "Demo stream parse failed."
+        })}\n\n`
+      );
+    }
   };
 
-  sendIncident();
-  const timer = setInterval(sendIncident, 8000);
-  req.on("close", () => clearInterval(timer));
+  void sendIncident();
+
+  const timer = setInterval(() => {
+    void sendIncident();
+  }, 8000);
+
+  req.on("close", () => {
+    closed = true;
+    clearInterval(timer);
+  });
 });
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -130,6 +170,7 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
     return;
   }
 
+  console.error("Unhandled server error:", error);
   res.status(500).json({ error: error instanceof Error ? error.message : "Server error." });
 });
 
@@ -168,6 +209,7 @@ function transcribeWithOpenAi(file: Express.Multer.File): Promise<string> {
 
 function getOpenAiKeyIssue(value: string | undefined): string | null {
   const key = value?.trim();
+
   if (!key) {
     return "Set OPENAI_API_KEY in .env to enable live transcription.";
   }

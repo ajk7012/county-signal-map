@@ -22,7 +22,10 @@ let mapLayer = "osm";
 let demoSource = null;
 let liveCapture = {
   stream: null,
+  audioStream: null,
   recorder: null,
+  segmentTimer: null,
+  mimeType: "",
   audioContext: null,
   analyser: null,
   meterTimer: null,
@@ -293,11 +296,13 @@ async function startLiveParse() {
 
     const audioStream = new MediaStream(audioTracks);
     const mimeType = getRecorderMimeType();
-    const recorder = new MediaRecorder(audioStream, mimeType ? { mimeType } : undefined);
 
     liveCapture = {
       stream: displayStream,
-      recorder,
+      audioStream,
+      recorder: null,
+      segmentTimer: null,
+      mimeType,
       audioContext: null,
       analyser: null,
       meterTimer: null,
@@ -310,32 +315,16 @@ async function startLiveParse() {
     };
 
     installVolumeGate(audioStream);
-
-    recorder.addEventListener("dataavailable", (event) => {
-      if (!liveCapture.active || event.data.size < 1200) return;
-      if (liveCapture.busy) {
-        logBusySkip();
-        return;
-      }
-      if (els.volumeGate.checked && !wasVoiceRecentlyActive()) {
-        logQuietSkip();
-        return;
-      }
-      enqueueLiveChunk(event.data);
-    });
-    recorder.addEventListener("stop", () => {
-      liveCapture.active = false;
-    });
     displayStream.getTracks().forEach((track) => {
       track.addEventListener("ended", stopLiveParse, { once: true });
     });
 
-    recorder.start(liveChunkMs);
     els.startLiveParse.disabled = true;
     els.stopLiveParse.disabled = false;
     els.status.textContent = "Live parser running";
     els.liveParseStatus.textContent = "Listening for volume spikes";
     addLiveLog("info", "Live parser started. Waiting for a volume spike before transcribing.");
+    scheduleNextSegment();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Live capture failed";
     els.liveParseStatus.textContent = message;
@@ -347,6 +336,9 @@ function stopLiveParse() {
   if (liveCapture.recorder?.state && liveCapture.recorder.state !== "inactive") {
     liveCapture.recorder.stop();
   }
+  if (liveCapture.segmentTimer) {
+    clearTimeout(liveCapture.segmentTimer);
+  }
   liveCapture.stream?.getTracks().forEach((track) => track.stop());
   if (liveCapture.meterTimer) {
     clearInterval(liveCapture.meterTimer);
@@ -354,7 +346,10 @@ function stopLiveParse() {
   liveCapture.audioContext?.close().catch(() => {});
   liveCapture = {
     stream: null,
+    audioStream: null,
     recorder: null,
+    segmentTimer: null,
+    mimeType: "",
     audioContext: null,
     analyser: null,
     meterTimer: null,
@@ -370,6 +365,68 @@ function stopLiveParse() {
   els.status.textContent = "Live parser stopped";
   els.liveParseStatus.textContent = "Live parser idle";
   addLiveLog("info", "Live parser stopped.");
+}
+
+function scheduleNextSegment(delayMs = 0) {
+  if (!liveCapture.active) return;
+  if (liveCapture.segmentTimer) {
+    clearTimeout(liveCapture.segmentTimer);
+  }
+
+  liveCapture.segmentTimer = setTimeout(recordOneSegment, delayMs);
+}
+
+function recordOneSegment() {
+  if (!liveCapture.active || !liveCapture.audioStream) return;
+
+  if (liveCapture.busy) {
+    logBusySkip();
+    scheduleNextSegment(liveChunkMs);
+    return;
+  }
+
+  const chunks = [];
+  const recorder = new MediaRecorder(
+    liveCapture.audioStream,
+    liveCapture.mimeType ? { mimeType: liveCapture.mimeType } : undefined
+  );
+  liveCapture.recorder = recorder;
+
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data.size > 0) {
+      chunks.push(event.data);
+    }
+  });
+
+  recorder.addEventListener("stop", () => {
+    if (!liveCapture.active) return;
+
+    if (els.volumeGate.checked && !wasVoiceRecentlyActive()) {
+      logQuietSkip();
+      scheduleNextSegment(500);
+      return;
+    }
+
+    const blob = new Blob(chunks, {
+      type: recorder.mimeType || liveCapture.mimeType || "audio/webm"
+    });
+
+    if (blob.size < 1200) {
+      logQuietSkip();
+      scheduleNextSegment(500);
+      return;
+    }
+
+    enqueueLiveChunk(blob);
+    scheduleNextSegment(500);
+  });
+
+  recorder.start();
+  liveCapture.segmentTimer = setTimeout(() => {
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
+  }, liveChunkMs);
 }
 
 function installVolumeGate(audioStream) {
@@ -453,7 +510,7 @@ async function processLiveQueue() {
   liveCapture.busy = true;
   const blob = liveCapture.queue.shift();
   const form = new FormData();
-  form.append("audio", blob, "live-dispatch.webm");
+  form.append("audio", blob, getLiveFilename(blob));
 
   try {
     els.liveParseStatus.textContent = "Transcribing live audio";
@@ -472,11 +529,14 @@ async function processLiveQueue() {
       const transcript = payload.transcript.trim();
       els.transcript.value = transcript;
       addIncident(payload.incident);
+      const loc = getIncidentLatLng(payload.incident);
       addLiveLog(
-        payload.incident?.address ? "plotted" : "transcript",
-        payload.incident?.address ? `${payload.incident.address}: ${transcript}` : `No address found: ${transcript}`
+        loc ? "plotted" : "transcript",
+        loc
+          ? `${payload.incident.address ?? "Incident"} @ ${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}: ${transcript}`
+          : `No drawable location: ${transcript}`
       );
-      els.liveParseStatus.textContent = "Live transcript plotted";
+      els.liveParseStatus.textContent = loc ? "Live transcript plotted" : "Live transcript has no drawable location";
     } else {
       els.liveParseStatus.textContent = "No speech in latest chunk";
       addLiveLog("silence", "No speech detected in latest chunk.");
@@ -489,6 +549,12 @@ async function processLiveQueue() {
     liveCapture.busy = false;
     processLiveQueue();
   }
+}
+
+function getLiveFilename(blob) {
+  if (blob.type.includes("ogg")) return "live-dispatch.ogg";
+  if (blob.type.includes("mp4")) return "live-dispatch.mp4";
+  return "live-dispatch.webm";
 }
 
 function addLiveLog(type, message) {
@@ -527,8 +593,41 @@ async function readApiResponse(response) {
   }
 }
 
+function getIncidentLatLng(incident) {
+  const loc = incident?.location;
+  if (!loc) return null;
+
+  const lat = Number(loc.lat ?? loc.latitude ?? loc.y);
+  const lng = Number(loc.lng ?? loc.lon ?? loc.longitude ?? loc.x);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    console.warn("Invalid incident coordinates:", incident);
+    return null;
+  }
+
+  // Greene County / Ohio sanity range.
+  // This catches missing coords, flipped coords, and garbage coords.
+  if (lat < 38 || lat > 41 || lng < -86 || lng > -82) {
+    console.warn("Incident coordinates outside expected Ohio range:", { incident, lat, lng });
+    return null;
+  }
+
+  return { lat, lng };
+}
+
 function addIncident(incident) {
+  const loc = getIncidentLatLng(incident);
+
+  console.log("Received incident:", incident);
+  console.log("Drawable location:", loc);
+
   incidents = [incident, ...incidents].slice(0, 24);
+
+  if (loc) {
+    view.center = loc;
+    view.zoom = Math.max(view.zoom, 16);
+  }
+
   render();
 }
 
@@ -539,7 +638,7 @@ function render() {
 }
 
 function renderList() {
-  const plotted = incidents.filter((incident) => incident.location);
+  const plotted = incidents.filter((incident) => getIncidentLatLng(incident));
   els.totalCount.textContent = `${incidents.length} transcripts`;
   els.plottedCount.textContent = `${plotted.length} plotted`;
   els.incidentList.replaceChildren(
@@ -552,9 +651,21 @@ function renderList() {
       const time = document.createElement("small");
 
       dot.className = `dot ${incident.category}`;
-      address.textContent = incident.address ?? "No street address found";
+      address.textContent = incident.address ?? incident.placeName ?? "No street address found";
       text.textContent = incident.transcript;
-      time.textContent = new Date(incident.receivedAt).toLocaleTimeString();
+
+      const when = incident.receivedAt ? new Date(incident.receivedAt) : null;
+      const timeText = when && !Number.isNaN(when.getTime()) ? when.toLocaleTimeString() : "No time";
+
+      const loc = getIncidentLatLng(incident);
+      const locText = loc ? ` · ${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}` : " · not drawable";
+
+      const sourceText = incident.geocodeSource ? ` · ${incident.geocodeSource}` : "";
+      const confidenceText =
+        typeof incident.confidence === "number" ? ` · ${Math.round(incident.confidence * 100)}%` : "";
+      const approximateText = incident.approximate ? " · approximate" : "";
+
+      time.textContent = `${timeText}${locText}${sourceText}${confidenceText}${approximateText}`;
 
       head.append(dot, address);
       item.append(head, text, time);
@@ -585,13 +696,44 @@ function renderMap() {
   pixiApp.stage.addChild(label);
 
   incidents.forEach((incident, index) => {
-    if (!incident.location) return;
-    const point = project(incident.location);
+    const loc = getIncidentLatLng(incident);
+    if (!loc) return;
+
+    const point = project(loc);
+
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+      console.warn("Projection failed:", { incident, loc, point });
+      return;
+    }
+
     const color = categoryColor[incident.category] ?? categoryColor.unknown;
     const marker = new PIXI.Graphics();
-    marker.circle(point.x, point.y, 14 + index * 0.4).fill({ color, alpha: 0.22 });
-    marker.circle(point.x, point.y, 7).fill(color).stroke({ color: 0xffffff, width: 2 });
+
+    const isNewest = index === 0;
+    const haloRadius = isNewest ? 34 : 24;
+    const markerRadius = isNewest ? 14 : 10;
+
+    marker.circle(point.x, point.y, haloRadius).fill({ color, alpha: 0.35 });
+    marker.circle(point.x, point.y, markerRadius).fill(color).stroke({ color: 0xffffff, width: 4 });
+    marker.circle(point.x, point.y, 4).fill({ color: 0x000000, alpha: 1 });
+
     pixiApp.stage.addChild(marker);
+
+    if (index < 8) {
+      const label = new PIXI.Text({
+        text: incident.address ?? incident.placeName ?? "Incident",
+        style: {
+          fill: "#111111",
+          fontFamily: "Arial",
+          fontSize: isNewest ? 16 : 13,
+          fontWeight: "700",
+          stroke: { color: "#ffffff", width: 4 }
+        }
+      });
+
+      label.position.set(point.x + markerRadius + 8, point.y - 10);
+      pixiApp.stage.addChild(label);
+    }
   });
 }
 
@@ -634,8 +776,17 @@ function drawTiles(width, height) {
 
 function project(point) {
   const { width, height } = pixiApp.renderer;
+  const safePoint = {
+    lat: Number(point.lat),
+    lng: Number(point.lng)
+  };
+
+  if (!Number.isFinite(safePoint.lat) || !Number.isFinite(safePoint.lng)) {
+    return { x: Number.NaN, y: Number.NaN };
+  }
+
   const centerWorld = latLngToWorld(view.center, view.zoom);
-  const pointWorld = latLngToWorld(point, view.zoom);
+  const pointWorld = latLngToWorld(safePoint, view.zoom);
   return {
     x: width / 2 + pointWorld.x - centerWorld.x,
     y: height / 2 + pointWorld.y - centerWorld.y
