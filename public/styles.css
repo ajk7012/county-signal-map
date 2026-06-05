@@ -232,9 +232,99 @@ small {
   grid-template-columns: 1fr 72px;
 }
 
+.liveGateControls {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, 150px) 80px;
+}
+
+.liveGateControls label {
+  align-items: center;
+  color: #324956;
+  display: flex;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 7px;
+  min-width: 0;
+}
+
+.liveGateControls input[type="range"] {
+  min-width: 70px;
+  width: 100%;
+}
+
+#volumeLevel {
+  background: #e8eef1;
+  border-radius: 999px;
+  color: #4a5f6b;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 5px 7px;
+  text-align: center;
+}
+
+#volumeLevel.active {
+  background: #d9ebff;
+  color: #1f5ea8;
+}
+
 .liveParseControls button:disabled {
   background: #9babb5;
   cursor: not-allowed;
+}
+
+.liveTranscriptBox {
+  background: #f5f8fa;
+  border: 1px solid #cad6dc;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.liveTranscriptBox strong {
+  font-size: 13px;
+}
+
+.liveTranscriptBox ol {
+  display: grid;
+  gap: 7px;
+  list-style: none;
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 0;
+}
+
+.liveTranscriptBox li {
+  border-left: 3px solid #7d8d98;
+  display: grid;
+  gap: 2px;
+  padding-left: 8px;
+}
+
+.liveTranscriptBox li.plotted {
+  border-left-color: #2f6fed;
+}
+
+.liveTranscriptBox li.transcript {
+  border-left-color: #f4a261;
+}
+
+.liveTranscriptBox li.error {
+  border-left-color: #e4572e;
+}
+
+.liveTranscriptBox li.silence {
+  border-left-color: #9babb5;
+}
+
+.liveTranscriptBox p {
+  color: #263b48;
+  line-height: 1.3;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .feedControls input {
@@ -327,6 +417,10 @@ small {
   .shell {
     grid-template-columns: 1fr;
     padding: 10px;
+  }
+
+  .liveGateControls {
+    grid-template-columns: 1fr;
   }
 
   .mapPane,

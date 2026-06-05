@@ -57,7 +57,19 @@
             <button id="startLiveParse">Start live parse</button>
             <button id="stopLiveParse" disabled>Stop</button>
           </div>
+          <div class="liveGateControls">
+            <label><input id="volumeGate" type="checkbox" checked /> Volume gate</label>
+            <label>
+              Trigger
+              <input id="volumeGateThreshold" type="range" min="1" max="20" value="4" />
+            </label>
+            <span id="volumeLevel">volume 0%</span>
+          </div>
           <small id="liveParseStatus">Live parser idle</small>
+          <div class="liveTranscriptBox">
+            <strong>Live transcript log</strong>
+            <ol id="liveTranscriptLog"></ol>
+          </div>
           <small>To parse live audio, click Start live parse and choose the feed tab with audio sharing enabled.</small>
         </div>
 

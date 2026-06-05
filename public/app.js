@@ -23,10 +23,19 @@ let demoSource = null;
 let liveCapture = {
   stream: null,
   recorder: null,
+  audioContext: null,
+  analyser: null,
+  meterTimer: null,
+  lastVoiceAt: 0,
+  lastQuietLogAt: 0,
+  lastBusyLogAt: 0,
   busy: false,
   queue: [],
   active: false
 };
+
+const liveChunkMs = 6000;
+const voiceHoldMs = 2500;
 
 const tileProviders = {
   osm: {
@@ -61,7 +70,11 @@ const els = {
   liveFeedFrame: document.querySelector("#liveFeedFrame"),
   startLiveParse: document.querySelector("#startLiveParse"),
   stopLiveParse: document.querySelector("#stopLiveParse"),
+  volumeGate: document.querySelector("#volumeGate"),
+  volumeGateThreshold: document.querySelector("#volumeGateThreshold"),
+  volumeLevel: document.querySelector("#volumeLevel"),
   liveParseStatus: document.querySelector("#liveParseStatus"),
+  liveTranscriptLog: document.querySelector("#liveTranscriptLog"),
   transcript: document.querySelector("#transcript"),
   parseButton: document.querySelector("#parseButton"),
   zoomIn: document.querySelector("#zoomIn"),
@@ -285,13 +298,25 @@ async function startLiveParse() {
     liveCapture = {
       stream: displayStream,
       recorder,
+      audioContext: null,
+      analyser: null,
+      meterTimer: null,
+      lastVoiceAt: 0,
+      lastQuietLogAt: 0,
+      lastBusyLogAt: 0,
       busy: false,
       queue: [],
       active: true
     };
 
+    installVolumeGate(audioStream);
+
     recorder.addEventListener("dataavailable", (event) => {
       if (!liveCapture.active || event.data.size < 1200) return;
+      if (els.volumeGate.checked && !wasVoiceRecentlyActive()) {
+        logQuietSkip();
+        return;
+      }
       enqueueLiveChunk(event.data);
     });
     recorder.addEventListener("stop", () => {
@@ -301,13 +326,16 @@ async function startLiveParse() {
       track.addEventListener("ended", stopLiveParse, { once: true });
     });
 
-    recorder.start(12000);
+    recorder.start(liveChunkMs);
     els.startLiveParse.disabled = true;
     els.stopLiveParse.disabled = false;
     els.status.textContent = "Live parser running";
-    els.liveParseStatus.textContent = "Capturing live audio chunks";
+    els.liveParseStatus.textContent = "Listening for volume spikes";
+    addLiveLog("info", "Live parser started. Waiting for a volume spike before transcribing.");
   } catch (error) {
-    els.liveParseStatus.textContent = error instanceof Error ? error.message : "Live capture failed";
+    const message = error instanceof Error ? error.message : "Live capture failed";
+    els.liveParseStatus.textContent = message;
+    addLiveLog("error", message);
   }
 }
 
@@ -316,9 +344,19 @@ function stopLiveParse() {
     liveCapture.recorder.stop();
   }
   liveCapture.stream?.getTracks().forEach((track) => track.stop());
+  if (liveCapture.meterTimer) {
+    clearInterval(liveCapture.meterTimer);
+  }
+  liveCapture.audioContext?.close().catch(() => {});
   liveCapture = {
     stream: null,
     recorder: null,
+    audioContext: null,
+    analyser: null,
+    meterTimer: null,
+    lastVoiceAt: 0,
+    lastQuietLogAt: 0,
+    lastBusyLogAt: 0,
     busy: false,
     queue: [],
     active: false
@@ -327,6 +365,64 @@ function stopLiveParse() {
   els.stopLiveParse.disabled = true;
   els.status.textContent = "Live parser stopped";
   els.liveParseStatus.textContent = "Live parser idle";
+  addLiveLog("info", "Live parser stopped.");
+}
+
+function installVolumeGate(audioStream) {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      addLiveLog("info", "Volume gate meter is unavailable in this browser.");
+      return;
+    }
+
+    const audioContext = new AudioContextClass();
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    audioContext.createMediaStreamSource(audioStream).connect(analyser);
+
+    liveCapture.audioContext = audioContext;
+    liveCapture.analyser = analyser;
+    liveCapture.meterTimer = setInterval(updateVolumeGate, 200);
+  } catch (error) {
+    addLiveLog("error", error instanceof Error ? error.message : "Volume gate failed to start.");
+  }
+}
+
+function updateVolumeGate() {
+  if (!liveCapture.analyser) return;
+
+  const samples = new Float32Array(liveCapture.analyser.fftSize);
+  liveCapture.analyser.getFloatTimeDomainData(samples);
+
+  let sum = 0;
+  for (const sample of samples) {
+    sum += sample * sample;
+  }
+
+  const rms = Math.sqrt(sum / samples.length);
+  const threshold = Number(els.volumeGateThreshold.value) / 100;
+  const volumePercent = Math.min(100, Math.round(rms * 300));
+  els.volumeLevel.textContent = `volume ${volumePercent}%`;
+
+  if (rms >= threshold) {
+    liveCapture.lastVoiceAt = Date.now();
+    els.volumeLevel.classList.add("active");
+  } else if (!wasVoiceRecentlyActive()) {
+    els.volumeLevel.classList.remove("active");
+  }
+}
+
+function wasVoiceRecentlyActive() {
+  return Date.now() - liveCapture.lastVoiceAt <= voiceHoldMs;
+}
+
+function logQuietSkip() {
+  const now = Date.now();
+  if (now - liveCapture.lastQuietLogAt < 12000) return;
+  liveCapture.lastQuietLogAt = now;
+  els.liveParseStatus.textContent = "Skipping quiet audio";
+  addLiveLog("silence", "Skipped quiet audio chunk. Waiting for a volume spike.");
 }
 
 function getRecorderMimeType() {
@@ -335,10 +431,17 @@ function getRecorderMimeType() {
 }
 
 function enqueueLiveChunk(blob) {
-  liveCapture.queue.push(blob);
-  if (liveCapture.queue.length > 4) {
-    liveCapture.queue.shift();
+  if (liveCapture.busy) {
+    liveCapture.queue = [blob];
+    const now = Date.now();
+    if (now - liveCapture.lastBusyLogAt > 12000) {
+      liveCapture.lastBusyLogAt = now;
+      addLiveLog("info", "Transcription is still busy. Keeping the newest voice chunk next.");
+    }
+    return;
   }
+
+  liveCapture.queue = [blob];
   processLiveQueue();
 }
 
@@ -352,6 +455,7 @@ async function processLiveQueue() {
 
   try {
     els.liveParseStatus.textContent = "Transcribing live audio";
+    addLiveLog("info", "Transcribing latest live audio chunk...");
     const response = await fetch("/api/transcribe-upload", {
       method: "POST",
       body: form
@@ -363,17 +467,41 @@ async function processLiveQueue() {
     }
 
     if (payload.transcript?.trim()) {
-      els.transcript.value = payload.transcript.trim();
+      const transcript = payload.transcript.trim();
+      els.transcript.value = transcript;
       addIncident(payload.incident);
+      addLiveLog(
+        payload.incident?.address ? "plotted" : "transcript",
+        payload.incident?.address ? `${payload.incident.address}: ${transcript}` : `No address found: ${transcript}`
+      );
       els.liveParseStatus.textContent = "Live transcript plotted";
     } else {
       els.liveParseStatus.textContent = "No speech in latest chunk";
+      addLiveLog("silence", "No speech detected in latest chunk.");
     }
   } catch (error) {
-    els.liveParseStatus.textContent = error instanceof Error ? error.message : "Live parse failed";
+    const message = error instanceof Error ? error.message : "Live parse failed";
+    els.liveParseStatus.textContent = message;
+    addLiveLog("error", message);
   } finally {
     liveCapture.busy = false;
     processLiveQueue();
+  }
+}
+
+function addLiveLog(type, message) {
+  const item = document.createElement("li");
+  const time = document.createElement("small");
+  const text = document.createElement("p");
+
+  item.className = type;
+  time.textContent = new Date().toLocaleTimeString();
+  text.textContent = message;
+  item.append(time, text);
+  els.liveTranscriptLog.prepend(item);
+
+  while (els.liveTranscriptLog.children.length > 12) {
+    els.liveTranscriptLog.lastElementChild?.remove();
   }
 }
 
