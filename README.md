@@ -22,12 +22,6 @@ When the transcript does not contain a usable street address, the parser records
 
 ![No address found transcript example](./screenshots/parse_no_address.PNG)
 
-### County bounding / wider map view
-
-The map supports broader county/regional views for checking whether plotted incidents fall inside the expected Greene County operating area.
-
-![Wider regional map and live transcript log](./screenshots/parse.PNG)
-
 Broadcastify notes:
 
 - Greene County feed: https://www.broadcastify.com/listen/feed/33333
