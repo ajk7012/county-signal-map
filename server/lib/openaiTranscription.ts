@@ -50,6 +50,7 @@ function requestOpenAi(
         hostname: "api.openai.com",
         path: "/v1/audio/transcriptions",
         method: "POST",
+        rejectUnauthorized: shouldVerifyOpenAiTls(),
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": `multipart/form-data; boundary=${boundary}`,
@@ -68,10 +69,42 @@ function requestOpenAi(
       }
     );
 
-    req.on("error", reject);
+    req.on("error", (error: NodeJS.ErrnoException) => {
+      if (isCertificateError(error)) {
+        reject(
+          new Error(
+            "OpenAI TLS certificate verification failed. For this local app, set OPENAI_ALLOW_INSECURE_TLS=true in .env and restart, or configure NODE_EXTRA_CA_CERTS with your local root certificate."
+          )
+        );
+        return;
+      }
+
+      reject(error);
+    });
     req.write(body);
     req.end();
   });
+}
+
+function shouldVerifyOpenAiTls(): boolean {
+  if (process.env.OPENAI_ALLOW_INSECURE_TLS === "true") {
+    return false;
+  }
+
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
+    return false;
+  }
+
+  return true;
+}
+
+function isCertificateError(error: NodeJS.ErrnoException): boolean {
+  return (
+    error.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
+    error.code === "UNABLE_TO_GET_ISSUER_CERT_LOCALLY" ||
+    error.code === "DEPTH_ZERO_SELF_SIGNED_CERT" ||
+    /unable to verify the first certificate|certificate verify failed/i.test(error.message)
+  );
 }
 
 function parseOpenAiError(body: string): string | null {
