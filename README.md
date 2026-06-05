@@ -1,6 +1,32 @@
 # County Signal Map
 
-Pixi-based public-safety incident mapper for Greene County, Ohio. The app targets the Broadcastify `Central and Eastern Greene County Public Safety` feed listing and provides a compliant ingestion path for licensed/uploaded audio instead of scraping live audio.
+Pixi-based public-safety incident mapper for Greene County, Ohio. The app targets the Broadcastify `Central and Eastern Greene County Public Safety` feed listing and provides a compliant ingestion path for licensed/uploaded audio instead of scraping live audio. It parses dispatch-style transcript text for street addresses, geocodes recognized incidents, and plots them on an interactive county map while showing live parser status in the side panel.
+
+## Screenshots
+
+### County signal map
+
+The main map view shows parsed incidents plotted on the Greene County map while the Broadcastify player and live transcript controls remain available in the right-side panel.
+
+![County Signal Map with plotted incident markers](./screenshots/map_dots.PNG)
+
+### Live Broadcastify player and transcript parser
+
+The app can load the Broadcastify feed page in the side panel and run the live parsing workflow from the same interface.
+
+![Broadcastify player and live transcript parser](./screenshots/parse2.PNG)
+
+### Transcript parsing feedback
+
+When the transcript does not contain a usable street address, the parser records the transcript text and reports that no address was found instead of plotting a bad location.
+
+![No address found transcript example](./screenshots/parse_no_address.PNG)
+
+### County bounding / wider map view
+
+The map supports broader county/regional views for checking whether plotted incidents fall inside the expected Greene County operating area.
+
+![Wider regional map and live transcript log](./screenshots/parse.PNG)
 
 Broadcastify notes:
 
