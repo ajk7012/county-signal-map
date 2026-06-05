@@ -1,15 +1,27 @@
+import https from "node:https";
 import type { CountyPreset, LatLng } from "./counties";
 
 export type GeocodeCandidate = {
   location: LatLng;
   label: string;
   confidence: number;
-  source: "arcgis" | "nominatim" | "county-fallback";
+  source: "nominatim" | "county-fallback";
   query: string;
   approximate: boolean;
 };
 
+type NominatimResult = {
+  lat: string;
+  lon: string;
+  display_name?: string;
+  importance?: number;
+  type?: string;
+  class?: string;
+  addresstype?: string;
+};
+
 const cache = new Map<string, GeocodeCandidate | null>();
+let lastRequestAt = 0;
 
 export async function geocodeBasicQuery(query: string, county: CountyPreset): Promise<GeocodeCandidate | null> {
   const cleaned = query.replace(/\s+/g, " ").trim();
@@ -18,21 +30,25 @@ export async function geocodeBasicQuery(query: string, county: CountyPreset): Pr
   const cacheKey = `${county.id}:${cleaned.toLowerCase()}`;
   if (cache.has(cacheKey)) return cache.get(cacheKey) ?? null;
 
-  const arcgis = await geocodeArcgis(cleaned, county);
-  if (arcgis) {
-    cache.set(cacheKey, arcgis);
-    return arcgis;
+  const bounded = await geocodeNominatim(cleaned, county, true);
+  if (bounded) {
+    cache.set(cacheKey, bounded);
+    return bounded;
   }
 
-  const nominatim = await geocodeNominatim(cleaned, county);
-  cache.set(cacheKey, nominatim);
-  return nominatim;
+  if (process.env.GEOCODER_UNBOUNDED_FALLBACK !== "true") {
+    cache.set(cacheKey, null);
+    return null;
+  }
+
+  const unbounded = await geocodeNominatim(cleaned, county, false);
+  cache.set(cacheKey, unbounded);
+  return unbounded;
 }
 
 export function makeCountyFallback(query: string, county: CountyPreset): GeocodeCandidate {
   const hash = simpleHash(query);
 
-  // Tiny deterministic offset so multiple weak matches do not stack exactly.
   const latOffset = ((hash % 300) - 150) / 100000;
   const lngOffset = (((hash >> 8) % 300) - 150) / 100000;
 
@@ -49,158 +65,155 @@ export function makeCountyFallback(query: string, county: CountyPreset): Geocode
   };
 }
 
-async function geocodeArcgis(query: string, county: CountyPreset): Promise<GeocodeCandidate | null> {
-  const url = new URL("https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates");
-
-  url.searchParams.set("f", "json");
-  url.searchParams.set("SingleLine", query);
-  url.searchParams.set("maxLocations", "10");
-  url.searchParams.set("outFields", "Match_addr,Addr_type,Score,City,Region");
-  url.searchParams.set("countryCode", "USA");
-
-  // Bias results toward the county.
-  url.searchParams.set(
-    "searchExtent",
-    `${county.bbox.west},${county.bbox.south},${county.bbox.east},${county.bbox.north}`
-  );
-
-  try {
-    const response = await fetch(url);
-    if (!response.ok) return null;
-
-    const payload = (await response.json()) as {
-      candidates?: Array<{
-        address?: string;
-        score?: number;
-        location?: {
-          x?: number;
-          y?: number;
-        };
-        attributes?: {
-          Match_addr?: string;
-          Addr_type?: string;
-          Score?: number;
-          City?: string;
-          Region?: string;
-        };
-      }>;
-    };
-
-    let bestNear: GeocodeCandidate | null = null;
-
-    for (const candidate of payload.candidates ?? []) {
-      const lng = Number(candidate.location?.x);
-      const lat = Number(candidate.location?.y);
-      const score = Number(candidate.score ?? candidate.attributes?.Score ?? 0);
-
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-      if (score < 45) continue;
-
-      const location = { lat, lng };
-      const addrType = candidate.attributes?.Addr_type ?? "";
-      const approximate = !/PointAddress|StreetAddress|Subaddress/i.test(addrType);
-
-      const result: GeocodeCandidate = {
-        location,
-        label: candidate.address ?? candidate.attributes?.Match_addr ?? query,
-        confidence: Math.max(0.25, Math.min(0.96, score / 100)),
-        source: "arcgis",
-        query,
-        approximate
-      };
-
-      // Strong preference: inside/near county.
-      if (insideCountyBox(location, county, 0.06)) {
-        return result;
-      }
-
-      // Loose nearby fallback.
-      if (!bestNear && insideCountyBox(location, county, 0.25)) {
-        bestNear = {
-          ...result,
-          confidence: Math.min(result.confidence, 0.45),
-          approximate: true
-        };
-      }
-    }
-
-    return bestNear;
-  } catch (error) {
-    console.warn("ArcGIS geocode failed:", query, error);
-    return null;
-  }
-}
-
-async function geocodeNominatim(query: string, county: CountyPreset): Promise<GeocodeCandidate | null> {
+async function geocodeNominatim(query: string, county: CountyPreset, bounded: boolean): Promise<GeocodeCandidate | null> {
   const url = new URL("https://nominatim.openstreetmap.org/search");
 
   url.searchParams.set("format", "jsonv2");
-  url.searchParams.set("limit", "10");
+  url.searchParams.set("limit", "8");
   url.searchParams.set("addressdetails", "1");
   url.searchParams.set("countrycodes", "us");
+  url.searchParams.set("dedupe", "1");
   url.searchParams.set("q", query);
-
-  // Bias around county bbox but do not hard-bound.
-  url.searchParams.set("bounded", "0");
   url.searchParams.set("viewbox", `${county.bbox.west},${county.bbox.north},${county.bbox.east},${county.bbox.south}`);
+  url.searchParams.set("bounded", bounded ? "1" : "0");
 
   try {
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "county-signal-map/0.1 local-development"
-      }
-    });
+    await respectNominatimPace();
 
-    if (!response.ok) return null;
+    const results = await requestJson<NominatimResult[]>(url);
+    const candidates = results
+      .map((result) => toCandidate(result, query, county))
+      .filter((candidate): candidate is GeocodeCandidate => Boolean(candidate))
+      .sort((a, b) => b.confidence - a.confidence);
 
-    const results = (await response.json()) as Array<{
-      lat: string;
-      lon: string;
-      display_name?: string;
-      importance?: number;
-      type?: string;
-      class?: string;
-    }>;
+    const strict = candidates.find((candidate) => insideCountyBox(candidate.location, county, 0.02));
+    if (strict) return strict;
 
-    let bestNear: GeocodeCandidate | null = null;
-
-    for (const result of results) {
-      const location = {
-        lat: Number(result.lat),
-        lng: Number(result.lon)
-      };
-
-      if (!Number.isFinite(location.lat) || !Number.isFinite(location.lng)) continue;
-
-      const approximate = !/house|residential|address|building/i.test(`${result.type ?? ""} ${result.class ?? ""}`);
-
-      const candidate: GeocodeCandidate = {
-        location,
-        label: result.display_name ?? query,
-        confidence: Math.max(0.25, Math.min(0.85, 0.5 + Number(result.importance ?? 0))),
-        source: "nominatim",
-        query,
-        approximate
-      };
-
-      if (insideCountyBox(location, county, 0.06)) {
-        return candidate;
-      }
-
-      if (!bestNear && insideCountyBox(location, county, 0.25)) {
-        bestNear = {
-          ...candidate,
-          confidence: Math.min(candidate.confidence, 0.42),
+    const near = candidates.find((candidate) => insideCountyBox(candidate.location, county, 0.25));
+    return near
+      ? {
+          ...near,
+          confidence: Math.min(near.confidence, 0.55),
           approximate: true
-        };
-      }
-    }
-
-    return bestNear;
+        }
+      : null;
   } catch (error) {
     console.warn("Nominatim geocode failed:", query, error);
     return null;
   }
+}
+
+function toCandidate(result: NominatimResult, query: string, county: CountyPreset): GeocodeCandidate | null {
+  const location = {
+    lat: Number(result.lat),
+    lng: Number(result.lon)
+  };
+
+  if (!Number.isFinite(location.lat) || !Number.isFinite(location.lng)) {
+    return null;
+  }
+
+  const kind = `${result.type ?? ""} ${result.class ?? ""} ${result.addresstype ?? ""}`;
+  const addressLike = /\b(house|residential|address|building|yes|apartments)\b/i.test(kind);
+  const roadLike = /\b(road|street|tertiary|secondary|residential)\b/i.test(kind);
+  const inCounty = insideCountyBox(location, county, 0.02);
+  const nearCounty = insideCountyBox(location, county, 0.25);
+
+  let confidence = 0.45 + Number(result.importance ?? 0);
+  if (addressLike) confidence += 0.22;
+  if (roadLike) confidence += 0.12;
+  if (inCounty) confidence += 0.22;
+  else if (nearCounty) confidence += 0.05;
+  else confidence -= 0.4;
+
+  return {
+    location,
+    label: result.display_name ?? query,
+    confidence: Math.max(0.15, Math.min(0.96, confidence)),
+    source: "nominatim",
+    query,
+    approximate: !addressLike
+  };
+}
+
+function requestJson<T>(url: URL): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        path: `${url.pathname}${url.search}`,
+        method: "GET",
+        rejectUnauthorized: shouldVerifyTls(),
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "county-signal-map/0.1 local-development"
+        }
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+
+        res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`OpenStreetMap geocoder returned ${res.statusCode}: ${body.slice(0, 200)}`));
+            return;
+          }
+
+          try {
+            resolve(JSON.parse(body) as T);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+
+    req.on("error", (error: NodeJS.ErrnoException) => {
+      if (isCertificateError(error)) {
+        reject(
+          new Error(
+            "OpenStreetMap TLS certificate verification failed. Set GEOCODER_ALLOW_INSECURE_TLS=true for local testing or configure NODE_EXTRA_CA_CERTS."
+          )
+        );
+        return;
+      }
+
+      reject(error);
+    });
+    req.setTimeout(Number(process.env.GEOCODER_REQUEST_TIMEOUT_MS ?? 3500), () => {
+      req.destroy(new Error("OpenStreetMap geocoder request timed out."));
+    });
+    req.end();
+  });
+}
+
+async function respectNominatimPace(): Promise<void> {
+  const minGapMs = Number(process.env.NOMINATIM_MIN_INTERVAL_MS ?? 1100);
+  const waitMs = lastRequestAt + minGapMs - Date.now();
+
+  if (waitMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  lastRequestAt = Date.now();
+}
+
+function shouldVerifyTls(): boolean {
+  if (process.env.GEOCODER_ALLOW_INSECURE_TLS === "true") return false;
+  if (process.env.OPENAI_ALLOW_INSECURE_TLS === "true") return false;
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0") return false;
+  return true;
+}
+
+function isCertificateError(error: NodeJS.ErrnoException): boolean {
+  return (
+    error.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
+    error.code === "UNABLE_TO_GET_ISSUER_CERT_LOCALLY" ||
+    error.code === "DEPTH_ZERO_SELF_SIGNED_CERT" ||
+    /unable to verify the first certificate|certificate verify failed/i.test(error.message)
+  );
 }
 
 function insideCountyBox(point: LatLng, county: CountyPreset, padding: number): boolean {

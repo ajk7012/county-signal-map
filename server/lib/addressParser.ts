@@ -230,20 +230,32 @@ function buildSearchQueries(input: {
   const queries: Array<string | null> = [];
 
   if (address) {
-    queries.push(`${address}, ${county.name}, ${county.state}`);
-    queries.push(`${address}, Ohio`);
+    const variants = expandAddressVariants(address);
+
+    for (const variant of variants) {
+      queries.push(`${variant}, ${county.name}, ${county.state}`);
+      queries.push(`${variant}, ${county.state}`);
+    }
 
     for (const city of cityHints) {
-      queries.push(`${address}, ${city}, ${county.state}`);
+      for (const variant of variants) {
+        queries.push(`${variant}, ${city}, ${county.state}`);
+      }
     }
   }
 
   if (roadOnly) {
-    queries.push(`${roadOnly}, ${county.name}, ${county.state}`);
-    queries.push(`${roadOnly}, Ohio`);
+    const variants = expandRoadVariants(roadOnly);
+
+    for (const variant of variants) {
+      queries.push(`${variant}, ${county.name}, ${county.state}`);
+      queries.push(`${variant}, ${county.state}`);
+    }
 
     for (const city of cityHints) {
-      queries.push(`${roadOnly}, ${city}, ${county.state}`);
+      for (const variant of variants) {
+        queries.push(`${variant}, ${city}, ${county.state}`);
+      }
     }
   }
 
@@ -264,7 +276,97 @@ function buildSearchQueries(input: {
   // Last broad attempt before fallback.
   queries.push(`${transcript}, ${county.name}, ${county.state}`);
 
-  return [...new Set(queries.filter(Boolean).map((query) => query.trim()).filter(Boolean) as string[])];
+  const uniqueQueries = [
+    ...new Set(
+      queries
+        .filter((query): query is string => Boolean(query))
+        .map((query) => query.trim())
+        .filter(Boolean)
+    )
+  ];
+
+  return uniqueQueries.slice(0, Number(process.env.GEOCODER_MAX_QUERIES ?? 4));
+}
+
+function expandAddressVariants(address: string): string[] {
+  const variants = new Set<string>();
+  variants.add(address);
+
+  const road = stripHouseNumber(address);
+  const house = address.match(/^\s*(\d{1,6})\s+/)?.[1] ?? null;
+
+  if (house && road) {
+    for (const roadVariant of expandRoadVariants(road)) {
+      variants.add(`${house} ${roadVariant}`);
+    }
+  }
+
+  return [...variants];
+}
+
+function expandRoadVariants(road: string): string[] {
+  const variants = new Set<string>();
+  variants.add(road);
+
+  for (const streetNameVariant of expandSingularPluralStreetName(road)) {
+    variants.add(streetNameVariant);
+  }
+
+  const endDirectional = road.match(/\b(North|South|East|West)\b$/i)?.[1];
+  if (endDirectional) {
+    const base = road.replace(/\s+\b(North|South|East|West)\b$/i, "").trim();
+    variants.add(`${endDirectional} ${base}`);
+    variants.add(`${base} ${directionalAbbreviation(endDirectional)}`);
+    variants.add(`${directionalAbbreviation(endDirectional)} ${base}`);
+  }
+
+  variants.add(
+    road
+      .replace(/\bStreet\b/gi, "St")
+      .replace(/\bAvenue\b/gi, "Ave")
+      .replace(/\bRoad\b/gi, "Rd")
+      .replace(/\bDrive\b/gi, "Dr")
+      .replace(/\bLane\b/gi, "Ln")
+      .replace(/\bBoulevard\b/gi, "Blvd")
+      .replace(/\bCourt\b/gi, "Ct")
+      .replace(/\bCircle\b/gi, "Cir")
+      .replace(/\bPlace\b/gi, "Pl")
+      .replace(/\bHighway\b/gi, "Hwy")
+      .replace(/\bRoute\b/gi, "Rt")
+      .replace(/\bParkway\b/gi, "Pkwy")
+  );
+
+  return [...variants].filter(Boolean);
+}
+
+function expandSingularPluralStreetName(road: string): string[] {
+  const match = road.match(/^(.+?)\s+(Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Court|Ct|Circle|Cir|Place|Pl)\b(.*)$/i);
+  if (!match) return [];
+
+  const [, name, suffix, rest] = match;
+  const words = name.split(/\s+/);
+  const last = words.at(-1);
+  if (!last || last.length < 4) return [];
+
+  const variants: string[] = [];
+  const baseWords = words.slice(0, -1);
+
+  if (last.endsWith("s")) {
+    variants.push([...baseWords, last.slice(0, -1), suffix].join(" ") + rest);
+  } else {
+    variants.push([...baseWords, `${last}s`, suffix].join(" ") + rest);
+  }
+
+  return variants.map((variant) => variant.replace(/\s+/g, " ").trim());
+}
+
+function directionalAbbreviation(value: string): string {
+  const lower = value.toLowerCase();
+  if (lower === "north") return "N";
+  if (lower === "south") return "S";
+  if (lower === "east") return "E";
+  if (lower === "west") return "W";
+  return value;
 }
 
 function extractPlaceName(transcript: string, address: string | null): string | null {
